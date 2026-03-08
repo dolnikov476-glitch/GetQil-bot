@@ -15,13 +15,11 @@ from telegram.ext import (
 )
 
 # ============================================================
-# НАСТРОЙКИ
-# ============================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8745686881:AAGXFVZ0s2GWPqPCb_pjDQgmZXMucDD1CE0")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
-FREE_REQUESTS_LIMIT = 5
-SUBSCRIPTION_PRICE = "299 руб/месяц"
-PAYMENT_INFO = "Для оплаты напишите @твой_юзернейм"  # <- замени
+FREE_REQUESTS_LIMIT = 20
+SUBSCRIPTION_PRICE = "100 руб/месяц"
+PAYMENT_INFO = "Для оплаты напишите @livix95"
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -154,7 +152,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Бесплатный лимит исчерпан!\n\n"
             f"Ты использовал все {FREE_REQUESTS_LIMIT} запросов.\n\n"
-            f"Подписка — {SUBSCRIPTION_PRICE}, безлимит!\n{PAYMENT_INFO}",
+            f"Подписка — всего {SUBSCRIPTION_PRICE}, безлимит!\n{PAYMENT_INFO}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Оформить подписку", callback_data="subscribe")]])
         )
         return
@@ -173,7 +171,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if remaining > 0:
                 footer = f"\n\nОсталось бесплатных запросов: {remaining}"
             else:
-                footer = f"\n\nПоследний бесплатный запрос использован!\nПодписка: {SUBSCRIPTION_PRICE}"
+                footer = f"\n\nПоследний бесплатный запрос использован!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
 
         await update.message.reply_text(result + footer)
 
