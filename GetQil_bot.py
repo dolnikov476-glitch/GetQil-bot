@@ -1,13 +1,17 @@
 """
-Qil — AI Telegram бот для генерации текстов
-Зависимости: pip install python-telegram-bot groq
+Qil — AI Telegram бот
+Функции: генерация текстов, изображений, озвучка
+Зависимости: pip install python-telegram-bot groq gtts requests
 """
 
 import logging
 import json
 import os
+import io
+import requests
 from pathlib import Path
 from groq import Groq
+from gtts import gTTS
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -46,9 +50,17 @@ def get_user(user_id: int) -> dict:
     users = load_users()
     uid = str(user_id)
     if uid not in users:
-        users[uid] = {"requests": 0, "is_paid": False}
+        users[uid] = {"requests": 0, "is_paid": False, "mode": "text"}
         save_users(users)
     return users[uid]
+
+
+def set_mode(user_id: int, mode: str):
+    users = load_users()
+    uid = str(user_id)
+    if uid in users:
+        users[uid]["mode"] = mode
+        save_users(users)
 
 
 def increment_requests(user_id: int):
@@ -64,6 +76,11 @@ def set_paid(user_id: int):
     if uid in users:
         users[uid]["is_paid"] = True
         save_users(users)
+
+
+def check_limit(user_id: int) -> bool:
+    user_data = get_user(user_id)
+    return user_data["is_paid"] or user_data["requests"] < FREE_REQUESTS_LIMIT
 
 
 def generate_text(user_prompt: str) -> str:
@@ -88,35 +105,60 @@ def generate_text(user_prompt: str) -> str:
     return response.choices[0].message.content
 
 
+def generate_image(prompt: str) -> bytes:
+    url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}?width=512&height=512&nologo=true"
+    response = requests.get(url, timeout=60)
+    return response.content
+
+
+def generate_voice(text: str) -> io.BytesIO:
+    tts = gTTS(text=text, lang="ru")
+    audio = io.BytesIO()
+    tts.write_to_fp(audio)
+    audio.seek(0)
+    return audio
+
+
+def limit_exceeded_markup():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Оформить подписку", callback_data="subscribe")]])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     get_user(user.id)
 
     text = (
         f"Привет, {user.first_name}!\n\n"
-        "Я Qil — твой AI копирайтер\n\n"
-        "Помогу написать:\n"
-        "- Посты для соцсетей\n"
-        "- Резюме и сопроводительные письма\n"
-        "- Описания товаров\n"
-        "- Рекламные тексты\n\n"
+        "Я Qil — твой AI ассистент\n\n"
+        "Что умею:\n"
+        "✍️ Генерировать тексты и посты\n"
+        "🎨 Рисовать изображения по запросу\n"
+        "🔊 Озвучивать любой текст\n\n"
         f"У тебя {FREE_REQUESTS_LIMIT} бесплатных запросов\n\n"
-        "Просто напиши что нужно — и я сделаю!"
+        "Выбери режим и напиши запрос!"
     )
 
-    keyboard = [[InlineKeyboardButton("Примеры запросов", callback_data="examples")]]
+    keyboard = [
+        [
+            InlineKeyboardButton("✍️ Текст", callback_data="mode_text"),
+            InlineKeyboardButton("🎨 Картинка", callback_data="mode_image"),
+            InlineKeyboardButton("🔊 Озвучка", callback_data="mode_voice"),
+        ],
+        [InlineKeyboardButton("💡 Примеры", callback_data="examples")]
+    ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Как пользоваться Qil:\n\n"
-        "Просто напиши запрос, например:\n\n"
-        "- Напиши пост про мой кофейный магазин\n"
-        "- Сделай резюме для маркетолога с 3 годами опыта\n"
-        "- Придумай рекламный текст для доставки еды\n"
-        "- Напиши описание товара: беспроводные наушники\n\n"
-        f"Подписка: {SUBSCRIPTION_PRICE} — безлимитные запросы\n"
+        "1. Выбери режим кнопками\n"
+        "2. Напиши запрос\n\n"
+        "Режимы:\n"
+        "✍️ Текст — посты, резюме, рекламные тексты\n"
+        "🎨 Картинка — любое изображение по описанию\n"
+        "🔊 Озвучка — отправь текст, получи аудио\n\n"
+        f"Подписка: {SUBSCRIPTION_PRICE} — безлимит\n"
         f"{PAYMENT_INFO}"
     )
     await update.message.reply_text(text)
@@ -126,15 +168,19 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(update.effective_user.id)
     requests_used = user_data["requests"]
     is_paid = user_data["is_paid"]
+    mode = user_data.get("mode", "text")
+
+    modes = {"text": "✍️ Текст", "image": "🎨 Картинка", "voice": "🔊 Озвучка"}
 
     if is_paid:
-        text = "У тебя премиум-доступ — безлимитные запросы!"
+        text = f"У тебя премиум-доступ — безлимитные запросы!\nТекущий режим: {modes.get(mode)}"
     else:
         remaining = max(0, FREE_REQUESTS_LIMIT - requests_used)
         text = (
             f"Твоя статистика:\n\n"
             f"Использовано запросов: {requests_used}\n"
             f"Осталось бесплатных: {remaining}\n"
+            f"Текущий режим: {modes.get(mode)}\n"
         )
         if remaining == 0:
             text += f"\nЛимит исчерпан!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
@@ -145,35 +191,67 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = get_user(user_id)
-    requests_used = user_data["requests"]
+    mode = user_data.get("mode", "text")
     is_paid = user_data["is_paid"]
 
-    if not is_paid and requests_used >= FREE_REQUESTS_LIMIT:
+    if not check_limit(user_id):
         await update.message.reply_text(
             f"Бесплатный лимит исчерпан!\n\n"
-            f"Ты использовал все {FREE_REQUESTS_LIMIT} запросов.\n\n"
             f"Подписка — всего {SUBSCRIPTION_PRICE}, безлимит!\n{PAYMENT_INFO}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Оформить подписку", callback_data="subscribe")]])
+            reply_markup=limit_exceeded_markup()
         )
         return
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action="typing" if mode != "image" else "upload_photo"
+    )
 
     try:
-        result = generate_text(update.message.text)
-        increment_requests(user_id)
+        if mode == "text":
+            result = generate_text(update.message.text)
+            increment_requests(user_id)
 
-        updated = get_user(user_id)
-        remaining = max(0, FREE_REQUESTS_LIMIT - updated["requests"])
+            updated = get_user(user_id)
+            remaining = max(0, FREE_REQUESTS_LIMIT - updated["requests"])
+            footer = ""
+            if not is_paid:
+                if remaining > 0:
+                    footer = f"\n\nОсталось запросов: {remaining}"
+                else:
+                    footer = f"\n\nЛимит исчерпан! Подписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
 
-        footer = ""
-        if not is_paid:
-            if remaining > 0:
-                footer = f"\n\nОсталось бесплатных запросов: {remaining}"
-            else:
-                footer = f"\n\nПоследний бесплатный запрос использован!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
+            await update.message.reply_text(result + footer)
 
-        await update.message.reply_text(result + footer)
+        elif mode == "image":
+            await update.message.reply_text("Рисую, подожди 10-20 секунд...")
+            image_bytes = generate_image(update.message.text)
+            increment_requests(user_id)
+
+            updated = get_user(user_id)
+            remaining = max(0, FREE_REQUESTS_LIMIT - updated["requests"])
+            caption = ""
+            if not is_paid and remaining == 0:
+                caption = f"Лимит исчерпан! Подписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
+            elif not is_paid:
+                caption = f"Осталось запросов: {remaining}"
+
+            await update.message.reply_photo(photo=image_bytes, caption=caption)
+
+        elif mode == "voice":
+            audio = generate_voice(update.message.text)
+            increment_requests(user_id)
+
+            updated = get_user(user_id)
+            remaining = max(0, FREE_REQUESTS_LIMIT - updated["requests"])
+
+            await update.message.reply_voice(voice=audio)
+
+            if not is_paid:
+                if remaining == 0:
+                    await update.message.reply_text(f"Лимит исчерпан! Подписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}")
+                else:
+                    await update.message.reply_text(f"Осталось запросов: {remaining}")
 
     except Exception as e:
         logger.error(f"Ошибка: {e}")
@@ -183,15 +261,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
 
-    if query.data == "examples":
+    if query.data == "mode_text":
+        set_mode(user_id, "text")
+        await query.message.reply_text("✍️ Режим: Текст\n\nНапиши что нужно написать!")
+
+    elif query.data == "mode_image":
+        set_mode(user_id, "image")
+        await query.message.reply_text("🎨 Режим: Картинка\n\nОпиши что нарисовать, например:\nКот в космосе, реализм\nЗакат над морем, акварель")
+
+    elif query.data == "mode_voice":
+        set_mode(user_id, "voice")
+        await query.message.reply_text("🔊 Режим: Озвучка\n\nОтправь любой текст — озвучу его!")
+
+    elif query.data == "examples":
         text = (
             "Примеры запросов:\n\n"
-            "- Напиши вовлекающий пост про фитнес для Instagram\n\n"
-            "- Составь резюме для Python-разработчика с опытом 2 года\n\n"
-            "- Напиши описание товара: умные часы с пульсометром\n\n"
-            "- Придумай рекламный текст для онлайн-школы английского\n\n"
-            "- Напиши сопроводительное письмо для вакансии менеджера"
+            "✍️ Текст:\n"
+            "- Напиши пост про кофейный магазин\n"
+            "- Составь резюме для маркетолога\n\n"
+            "🎨 Картинка:\n"
+            "- Кот в скафандре, цифровое искусство\n"
+            "- Горный пейзаж на закате, акварель\n\n"
+            "🔊 Озвучка:\n"
+            "- Просто вставь любой текст"
         )
         await query.message.reply_text(text)
 
@@ -199,7 +293,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"Оформление подписки\n\n"
             f"Стоимость: {SUBSCRIPTION_PRICE}\n"
-            f"Доступ: безлимитные запросы\n\n"
+            f"Доступ: безлимитные запросы на все функции\n\n"
             f"{PAYMENT_INFO}\n\n"
             "После оплаты пришли скриншот — активируем в течение часа!"
         )
