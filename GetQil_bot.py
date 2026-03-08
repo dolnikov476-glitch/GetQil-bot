@@ -17,8 +17,8 @@ from telegram.ext import (
 # ============================================================
 # НАСТРОЙКИ
 # ============================================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "ВАШ_КЛЮЧ_ОТ_GROQ")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8745686881:AAGXFVZ0s2GWPqPCb_pjDQgmZXMucDD1CE0")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 FREE_REQUESTS_LIMIT = 5
 SUBSCRIPTION_PRICE = "299 руб/месяц"
 PAYMENT_INFO = "Для оплаты напишите @твой_юзернейм"  # <- замени
