@@ -1,6 +1,6 @@
 """
 Qil — AI Telegram бот
-Функции: генерация текстов, изображений, озвучка
+Функции: генерация текстов, изображений, озвучка, память разговора
 Зависимости: pip install python-telegram-bot groq gtts requests
 """
 
@@ -24,6 +24,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "gsk_71BXK91ptvwXylScaQ4gWGdyb3FYW
 FREE_REQUESTS_LIMIT = 20
 SUBSCRIPTION_PRICE = "100 руб/месяц"
 PAYMENT_INFO = "Для оплаты напишите @livix95"
+MAX_MEMORY = 10  # Сколько сообщений помнит бот
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +51,7 @@ def get_user(user_id: int) -> dict:
     users = load_users()
     uid = str(user_id)
     if uid not in users:
-        users[uid] = {"requests": 0, "is_paid": False, "mode": "text"}
+        users[uid] = {"requests": 0, "is_paid": False, "mode": "text", "history": []}
         save_users(users)
     return users[uid]
 
@@ -61,6 +62,33 @@ def set_mode(user_id: int, mode: str):
     if uid in users:
         users[uid]["mode"] = mode
         save_users(users)
+
+
+def add_to_history(user_id: int, role: str, content: str):
+    users = load_users()
+    uid = str(user_id)
+    if uid not in users:
+        return
+    if "history" not in users[uid]:
+        users[uid]["history"] = []
+    users[uid]["history"].append({"role": role, "content": content})
+    # Оставляем только последние MAX_MEMORY сообщений
+    if len(users[uid]["history"]) > MAX_MEMORY * 2:
+        users[uid]["history"] = users[uid]["history"][-MAX_MEMORY * 2:]
+    save_users(users)
+
+
+def clear_history(user_id: int):
+    users = load_users()
+    uid = str(user_id)
+    if uid in users:
+        users[uid]["history"] = []
+        save_users(users)
+
+
+def get_history(user_id: int) -> list:
+    user_data = get_user(user_id)
+    return user_data.get("history", [])
 
 
 def increment_requests(user_id: int):
@@ -83,26 +111,36 @@ def check_limit(user_id: int) -> bool:
     return user_data["is_paid"] or user_data["requests"] < FREE_REQUESTS_LIMIT
 
 
-def generate_text(user_prompt: str) -> str:
+def generate_text(user_id: int, user_prompt: str) -> str:
+    history = get_history(user_id)
+
+    system = (
+        "Ты профессиональный копирайтер и помощник по созданию текстов на русском языке. "
+        "Пиши грамотно, убедительно и по делу. "
+        "Если просят пост — делай его живым и вовлекающим. "
+        "Если резюме — структурированным. "
+        "Если рекламный текст — цепляющим. "
+        "Помни контекст предыдущих сообщений и учитывай его в ответах. "
+        "Не используй символы * # и другое markdown форматирование в ответе."
+    )
+
+    messages = [{"role": "system", "content": system}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_prompt})
+
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты профессиональный копирайтер и помощник по созданию текстов на русском языке. "
-                    "Пиши грамотно, убедительно и по делу. "
-                    "Если просят пост — делай его живым и вовлекающим. "
-                    "Если резюме — структурированным. "
-                    "Если рекламный текст — цепляющим. "
-                    "Не используй символы * # и другое markdown форматирование в ответе."
-                )
-            },
-            {"role": "user", "content": user_prompt}
-        ],
+        messages=messages,
         max_tokens=1024
     )
-    return response.choices[0].message.content
+
+    result = response.choices[0].message.content
+
+    # Сохраняем в память
+    add_to_history(user_id, "user", user_prompt)
+    add_to_history(user_id, "assistant", result)
+
+    return result
 
 
 def generate_image(prompt: str) -> bytes:
@@ -133,7 +171,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Что умею:\n"
         "✍️ Генерировать тексты и посты\n"
         "🎨 Рисовать изображения по запросу\n"
-        "🔊 Озвучивать любой текст\n\n"
+        "🔊 Озвучивать любой текст\n"
+        "🧠 Помню контекст нашего разговора\n\n"
         f"У тебя {FREE_REQUESTS_LIMIT} бесплатных запросов\n\n"
         "Выбери режим и напиши запрос!"
     )
@@ -144,7 +183,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🎨 Картинка", callback_data="mode_image"),
             InlineKeyboardButton("🔊 Озвучка", callback_data="mode_voice"),
         ],
-        [InlineKeyboardButton("💡 Примеры", callback_data="examples")]
+        [
+            InlineKeyboardButton("🧹 Очистить память", callback_data="clear_memory"),
+            InlineKeyboardButton("💡 Примеры", callback_data="examples"),
+        ]
     ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -158,6 +200,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✍️ Текст — посты, резюме, рекламные тексты\n"
         "🎨 Картинка — любое изображение по описанию\n"
         "🔊 Озвучка — отправь текст, получи аудио\n\n"
+        "Команды:\n"
+        "/start — главное меню\n"
+        "/status — твоя статистика\n"
+        "/clear — очистить память разговора\n\n"
         f"Подписка: {SUBSCRIPTION_PRICE} — безлимит\n"
         f"{PAYMENT_INFO}"
     )
@@ -169,11 +215,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     requests_used = user_data["requests"]
     is_paid = user_data["is_paid"]
     mode = user_data.get("mode", "text")
+    history_len = len(user_data.get("history", [])) // 2
 
     modes = {"text": "✍️ Текст", "image": "🎨 Картинка", "voice": "🔊 Озвучка"}
 
     if is_paid:
-        text = f"У тебя премиум-доступ — безлимитные запросы!\nТекущий режим: {modes.get(mode)}"
+        text = (
+            f"У тебя премиум-доступ — безлимитные запросы!\n"
+            f"Текущий режим: {modes.get(mode)}\n"
+            f"Сообщений в памяти: {history_len}"
+        )
     else:
         remaining = max(0, FREE_REQUESTS_LIMIT - requests_used)
         text = (
@@ -181,11 +232,17 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Использовано запросов: {requests_used}\n"
             f"Осталось бесплатных: {remaining}\n"
             f"Текущий режим: {modes.get(mode)}\n"
+            f"Сообщений в памяти: {history_len}\n"
         )
         if remaining == 0:
             text += f"\nЛимит исчерпан!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
 
     await update.message.reply_text(text)
+
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_history(update.effective_user.id)
+    await update.message.reply_text("🧹 Память очищена! Начинаем с чистого листа.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,7 +266,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if mode == "text":
-            result = generate_text(update.message.text)
+            result = generate_text(user_id, update.message.text)
             increment_requests(user_id)
 
             updated = get_user(user_id)
@@ -269,21 +326,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "mode_image":
         set_mode(user_id, "image")
-        await query.message.reply_text("🎨 Режим: Картинка\n\nОпиши что нарисовать, например:\nКот в космосе, реализм\nЗакат над морем, акварель")
+        await query.message.reply_text("🎨 Режим: Картинка\n\nОпиши что нарисовать!")
 
     elif query.data == "mode_voice":
         set_mode(user_id, "voice")
-        await query.message.reply_text("🔊 Режим: Озвучка\n\nОтправь любой текст — озвучу его!")
+        await query.message.reply_text("🔊 Режим: Озвучка\n\nОтправь любой текст — озвучу!")
+
+    elif query.data == "clear_memory":
+        clear_history(user_id)
+        await query.message.reply_text("🧹 Память очищена!")
 
     elif query.data == "examples":
         text = (
             "Примеры запросов:\n\n"
             "✍️ Текст:\n"
             "- Напиши пост про кофейный магазин\n"
-            "- Составь резюме для маркетолога\n\n"
+            "- Сделай его короче\n"
+            "- Добавь призыв к действию\n\n"
             "🎨 Картинка:\n"
-            "- Кот в скафандре, цифровое искусство\n"
-            "- Горный пейзаж на закате, акварель\n\n"
+            "- Кот в скафандре, цифровое искусство\n\n"
             "🔊 Озвучка:\n"
             "- Просто вставь любой текст"
         )
@@ -306,6 +367,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
