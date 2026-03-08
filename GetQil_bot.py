@@ -20,12 +20,13 @@ from telegram.ext import (
 )
 
 # ============================================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "ВАШ_КЛЮЧ_ОТ_GROQ")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8745686881:AAGXFVZ0s2GWPqPCb_pjDQgmZXMucDD1CE0")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
 FREE_REQUESTS_LIMIT = 20
 SUBSCRIPTION_PRICE = "100 руб/месяц"
 PAYMENT_INFO = "Для оплаты напишите @livix95"
 MAX_MEMORY = 10
+STOP_WORDS = ["стоп", "назад", "меню", "хватит", "stop", "back", "старт"]
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -148,14 +149,9 @@ def analyze_photo(image_bytes: bytes, caption: str = "") -> str:
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        }
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
                     },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
+                    {"type": "text", "text": prompt}
                 ]
             }
         ],
@@ -165,7 +161,6 @@ def analyze_photo(image_bytes: bytes, caption: str = "") -> str:
 
 
 def generate_image(prompt: str) -> bytes:
-    # Улучшаем промпт для лучшего качества
     enhanced_prompt = (
         f"{prompt}, "
         "high quality, detailed, professional, 4k, sharp focus, "
@@ -216,7 +211,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📸 Анализировать фотографии\n"
         "🧠 Помню контекст разговора\n\n"
         f"У тебя {FREE_REQUESTS_LIMIT} бесплатных запросов\n\n"
-        "Выбери режим и напиши запрос!"
+        "Напиши СТОП или НАЗАД чтобы вернуться в меню"
     )
     await update.message.reply_text(text, reply_markup=main_keyboard())
 
@@ -225,7 +220,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Как пользоваться Qil:\n\n"
         "1. Выбери режим кнопками\n"
-        "2. Напиши запрос или отправь фото\n\n"
+        "2. Напиши запрос или отправь фото\n"
+        "3. Напиши СТОП или НАЗАД чтобы вернуться в меню\n\n"
         "Режимы:\n"
         "✍️ Текст — посты, резюме, рекламные тексты\n"
         "🎨 Картинка — изображение по описанию\n"
@@ -280,6 +276,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(user_id)
     mode = user_data.get("mode", "text")
     is_paid = user_data["is_paid"]
+    text_input = update.message.text.lower().strip()
+
+    # Кодовые слова — возврат в главное меню
+    if text_input in STOP_WORDS:
+        set_mode(user_id, "text")
+        await update.message.reply_text("Главное меню:", reply_markup=main_keyboard())
+        return
 
     if not check_limit(user_id):
         await update.message.reply_text(
@@ -327,7 +330,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg)
 
         elif mode == "photo":
-            await update.message.reply_text("Для анализа фото — отправь фотографию!")
+            await update.message.reply_text("Отправь фото! Можешь добавить подпись с вопросом.")
 
     except Exception as e:
         logger.error(f"Ошибка: {e}")
@@ -352,7 +355,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
-
         caption = update.message.caption or ""
         result = analyze_photo(bytes(image_bytes), caption)
         increment_requests(user_id)
@@ -377,16 +379,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "mode_text":
         set_mode(user_id, "text")
-        await query.message.reply_text("✍️ Режим: Текст\n\nНапиши что нужно написать!")
+        await query.message.reply_text("✍️ Режим: Текст\n\nНапиши что нужно написать!\nНапиши СТОП чтобы вернуться в меню.")
     elif query.data == "mode_image":
         set_mode(user_id, "image")
-        await query.message.reply_text("🎨 Режим: Картинка\n\nОпиши что нарисовать!")
+        await query.message.reply_text("🎨 Режим: Картинка\n\nОпиши что нарисовать!\nНапиши СТОП чтобы вернуться в меню.")
     elif query.data == "mode_voice":
         set_mode(user_id, "voice")
-        await query.message.reply_text("🔊 Режим: Озвучка\n\nОтправь любой текст — озвучу!")
+        await query.message.reply_text("🔊 Режим: Озвучка\n\nОтправь любой текст — озвучу!\nНапиши СТОП чтобы вернуться в меню.")
     elif query.data == "mode_photo":
         set_mode(user_id, "photo")
-        await query.message.reply_text("📸 Режим: Анализ фото\n\nОтправь фото — опишу что на нём!\nМожешь добавить подпись с вопросом.")
+        await query.message.reply_text("📸 Режим: Анализ фото\n\nОтправь фото — опишу что на нём!\nМожешь добавить подпись с вопросом.\nНапиши СТОП чтобы вернуться в меню.")
     elif query.data == "clear_memory":
         clear_history(user_id)
         await query.message.reply_text("🧹 Память очищена!")
@@ -403,7 +405,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- Отправь фото с подписью: что здесь?\n"
             "- Или: напиши пост по этому фото\n\n"
             "🔊 Озвучка:\n"
-            "- Просто вставь любой текст"
+            "- Просто вставь любой текст\n\n"
+            "Напиши СТОП или НАЗАД чтобы вернуться в меню"
         )
         await query.message.reply_text(text)
     elif query.data == "subscribe":
