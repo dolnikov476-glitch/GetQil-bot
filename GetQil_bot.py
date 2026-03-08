@@ -5,6 +5,7 @@ Qil — AI Telegram бот для генерации текстов
 
 import logging
 import json
+import os
 from pathlib import Path
 from groq import Groq
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,17 +13,15 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler
 )
-from telegram.request import HTTPXRequest
 
 # ============================================================
-# НАСТРОЙКИ — ЗАПОЛНИ ПЕРЕД ЗАПУСКОМ
+# НАСТРОЙКИ
 # ============================================================
-TELEGRAM_TOKEN = "8745686881:AAGXFVZ0s2GWPqPCb_pjDQgmZXMucDD1CE0"   # <- вставь сюда
-GROQ_API_KEY = "org_01kk6h8jq3fvw9yw3yzj0q28yg"           # <- вставь сюда
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "ВАШ_КЛЮЧ_ОТ_GROQ")
 FREE_REQUESTS_LIMIT = 5
 SUBSCRIPTION_PRICE = "299 руб/месяц"
 PAYMENT_INFO = "Для оплаты напишите @твой_юзернейм"  # <- замени
-PROXY_URL = "http://127.0.0.1:7890"
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -210,31 +209,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    request = HTTPXRequest(
-        proxy=PROXY_URL,
-        connection_pool_size=16,
-        pool_timeout=60.0,
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-    )
-
-    get_updates_request = HTTPXRequest(
-        proxy=PROXY_URL,
-        connection_pool_size=8,
-        pool_timeout=60.0,
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-    )
-
-    app = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .request(request)
-        .get_updates_request(get_updates_request)
-        .build()
-    )
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
