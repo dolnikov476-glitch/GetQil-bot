@@ -22,7 +22,7 @@ from telegram.ext import (
 # ============================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8745686881:AAGXFVZ0s2GWPqPCb_pjDQgmZXMucDD1CE0")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
-FREE_REQUESTS_LIMIT = 20
+FREE_REQUESTS_LIMIT = 10
 REFERRAL_BONUS = 10
 SUBSCRIPTION_PRICE = "100 руб/месяц"
 PAYMENT_INFO = "Для оплаты напишите @livix95"
@@ -135,7 +135,10 @@ def set_paid(user_id: int):
 
 
 def check_limit(user_id: int) -> bool:
-    return True  # Лимит временно отключён
+    d = get_user(user_id)
+    if d.get("unlimited"):
+        return True
+    return d["requests"] < FREE_REQUESTS_LIMIT or d.get("bonus_requests", 0) > 0
 
 
 def get_remaining(user_id: int) -> int:
@@ -154,7 +157,8 @@ def register_referral(new_user_id: int, referrer_id: int):
         users[new_uid]["referred_by"] = referrer_id
         if ref_uid in users:
             users[ref_uid]["referrals"] = users[ref_uid].get("referrals", 0) + 1
-            users[ref_uid]["bonus_requests"] = users[ref_uid].get("bonus_requests", 0) + REFERRAL_BONUS
+            # Разблокируем безлимит за первого реферала
+            users[ref_uid]["unlimited"] = True
         save_users(users)
         return True
     return False
@@ -176,13 +180,17 @@ def smart_response(user_id: int, user_prompt: str) -> dict:
     last_voice = user_data.get("last_voice_text")
 
     system = (
-        "Ты профессиональный AI ассистент и копирайтер на русском языке. "
-        "Ты помнишь весь контекст разговора. "
+        "Ты Qil — живой, харизматичный AI ассистент и копирайтер на русском языке. "
+        "У тебя есть характер: ты весёлый, искренний, иногда немного саркастичный но добрый. "
+        "Ты реагируешь на запросы как человек — с эмоциями, эмодзи, короткими живыми комментариями. "
+        "Ты помнишь весь контекст разговора включая фото, картинки и озвучку. "
+        "ВАЖНО: ты один — не раздваивайся, пиши всё в одном ответе. "
+        "Если нужно написать текст — сначала коротко отреагируй (1 предложение), потом сам текст. "
         "Если пользователь просит изменить предыдущую картинку — улучши промпт и верни JSON: {\"type\": \"image\", \"content\": \"новый промпт на английском\"}\n"
         "Если пользователь просит переозвучить или изменить текст для озвучки — верни JSON: {\"type\": \"voice\", \"content\": \"новый текст\"}\n"
         "Если пользователь явно просит нарисовать картинку — верни JSON: {\"type\": \"image\", \"content\": \"промпт на английском\"}\n"
         "Если пользователь явно просит озвучить текст — верни JSON: {\"type\": \"voice\", \"content\": \"текст для озвучки\"}\n"
-        "Во всех остальных случаях верни JSON: {\"type\": \"text\", \"content\": \"твой ответ\"}\n"
+        "Во всех остальных случаях верни JSON: {\"type\": \"text\", \"content\": \"твой живой ответ\"}\n"
         "ВАЖНО: возвращай ТОЛЬКО валидный JSON без markdown и без лишнего текста.\n"
         f"Последний промпт для картинки: {last_image or 'нет'}\n"
         f"Последний текст для озвучки: {last_voice or 'нет'}"
@@ -282,10 +290,7 @@ def footer_text(user_id: int, is_paid: bool) -> str:
 
 def start_keyboard():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💡 Что я умею?", callback_data="what_can_i_do"),
-            InlineKeyboardButton("👥 Реферальная ссылка", callback_data="referral"),
-        ]
+        [InlineKeyboardButton("💡 Что я умею?", callback_data="what_can_i_do")]
     ])
 
 
@@ -302,7 +307,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=referrer_id,
-                        text=f"🎉 По твоей ссылке зарегистрировался новый пользователь!\nТы получил +{REFERRAL_BONUS} бонусных запросов!"
+                        text=(
+                            "🎉 Твой друг только что присоединился к Qil!\n\n"
+                            "✅ Безлимитный доступ разблокирован!\n"
+                            "Теперь ты можешь пользоваться ботом без ограничений 🚀"
+                        )
                     )
                 except:
                     pass
@@ -372,8 +381,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not check_limit(user_id):
+        bot_info = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
         await update.message.reply_text(
-            f"Лимит исчерпан!\n\nПодписка — {SUBSCRIPTION_PRICE}, безлимит!\n{PAYMENT_INFO}"
+            "✨ Твой пробный период завершён!\n\n"
+            "Ты использовал все 10 бесплатных запросов.\n\n"
+            "Хочешь продолжить? Всё просто:\n"
+            "👇 Пригласи одного друга по своей ссылке\n"
+            "Как только он напишет боту — ты получишь безлимитный доступ!\n\n"
+            f"Твоя ссылка:\n{ref_link}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📨 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Попробуй этого AI ассистента — он пишет тексты, рисует картинки и озвучивает! 🔥")]
+            ])
         )
         return
 
@@ -384,10 +403,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if result["type"] == "image":
             prompt = result["content"]
-            reaction = get_reaction("картинка", text_input)
-            if reaction:
-                await update.message.reply_text(reaction)
-            await update.message.reply_text("Рисую, подожди 15-30 секунд...")
+            await update.message.reply_text("Рисую, подожди 15-30 секунд... 🎨")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
             image_bytes = generate_image(prompt)
             increment_requests(user_id)
@@ -402,9 +418,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not voice_text.strip():
                 await update.message.reply_text("Напиши текст для озвучки, например:\nОзвучь: Привет!")
                 return
-            reaction = get_reaction("озвучка", text_input)
-            if reaction:
-                await update.message.reply_text(reaction)
             audio = generate_voice(voice_text)
             increment_requests(user_id)
             save_last_voice(user_id, voice_text)
@@ -416,9 +429,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(ft.strip())
 
         else:
-            reaction = get_reaction("текст", text_input)
-            if reaction:
-                await update.message.reply_text(reaction)
             text_result = result["content"]
             increment_requests(user_id)
             add_to_history(user_id, "user", text_input)
