@@ -135,8 +135,7 @@ def set_paid(user_id: int):
 
 
 def check_limit(user_id: int) -> bool:
-    d = get_user(user_id)
-    return d["is_paid"] or d["requests"] < FREE_REQUESTS_LIMIT or d.get("bonus_requests", 0) > 0
+    return True  # Лимит временно отключён
 
 
 def get_remaining(user_id: int) -> int:
@@ -252,13 +251,33 @@ def generate_voice(text: str) -> io.BytesIO:
     return audio
 
 
-def footer_text(user_id: int, is_paid: bool) -> str:
-    if is_paid:
+def get_reaction(request_type: str, user_prompt: str) -> str:
+    """Генерирует живой комментарий к запросу пользователя"""
+    try:
+        prompt = (
+            f"Ты весёлый и живой AI ассистент по имени Qil. "
+            f"Пользователь только что попросил тебя: '{user_prompt}'\n"
+            f"Тип запроса: {request_type}\n\n"
+            f"Напиши короткую живую реакцию (1-2 предложения максимум) — "
+            f"как будто ты реально заинтересован и рад помочь. "
+            f"Можешь добавить эмодзи. Будь естественным, не занудным. "
+            f"Не повторяй запрос дословно — просто отреагируй по-человечески. "
+            f"Примеры: 'О, интересная тема! Сейчас сделаю 🔥', "
+            f"'Ха, люблю такие задачи 😄 Погнали!', "
+            f"'Хм, надо подумать... но уже есть идеи! ✍️'"
+        )
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=80
+        )
+        return response.choices[0].message.content.strip()
+    except:
         return ""
-    remaining = get_remaining(user_id)
-    if remaining > 0:
-        return f"\n\nОсталось запросов: {remaining}"
-    return f"\n\nЛимит исчерпан!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
+
+
+def footer_text(user_id: int, is_paid: bool) -> str:
+    return ""  # Лимит временно отключён
 
 
 def start_keyboard():
@@ -366,6 +385,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if result["type"] == "image":
             prompt = result["content"]
+            reaction = get_reaction("картинка", text_input)
+            if reaction:
+                await update.message.reply_text(reaction)
             await update.message.reply_text("Рисую, подожди 15-30 секунд...")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
             image_bytes = generate_image(prompt)
@@ -381,6 +403,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not voice_text.strip():
                 await update.message.reply_text("Напиши текст для озвучки, например:\nОзвучь: Привет!")
                 return
+            reaction = get_reaction("озвучка", text_input)
+            if reaction:
+                await update.message.reply_text(reaction)
             audio = generate_voice(voice_text)
             increment_requests(user_id)
             save_last_voice(user_id, voice_text)
@@ -392,6 +417,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(ft.strip())
 
         else:
+            reaction = get_reaction("текст", text_input)
+            if reaction:
+                await update.message.reply_text(reaction)
             text_result = result["content"]
             increment_requests(user_id)
             add_to_history(user_id, "user", text_input)
