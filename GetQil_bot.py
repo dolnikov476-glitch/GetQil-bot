@@ -312,8 +312,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"Привет, {user.first_name}!\n\n"
         "Я Qil — твой AI ассистент ✍️\n\n"
-        "Просто напиши мне что нужно — я сам пойму!\n\n"
-        f"У тебя {FREE_REQUESTS_LIMIT} бесплатных запросов"
+        "Просто напиши мне что нужно — я сам пойму!"
     )
     await update.message.reply_text(text, reply_markup=start_keyboard())
 
