@@ -1,6 +1,6 @@
 """
 Qil — AI Telegram бот
-Без кнопок — умное определение режима по ключевым словам
+Единая память для всех режимов + кнопка "Что я умею"
 Зависимости: pip install python-telegram-bot groq gtts requests
 """
 
@@ -13,10 +13,10 @@ import requests
 from pathlib import Path
 from groq import Groq
 from gtts import gTTS
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes
+    filters, ContextTypes, CallbackQueryHandler
 )
 
 # ============================================================
@@ -26,7 +26,7 @@ FREE_REQUESTS_LIMIT = 20
 REFERRAL_BONUS = 10
 SUBSCRIPTION_PRICE = "100 руб/месяц"
 PAYMENT_INFO = "Для оплаты напишите @livix95"
-MAX_MEMORY = 10
+MAX_MEMORY = 20
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -35,11 +35,9 @@ logger = logging.getLogger(__name__)
 client = Groq(api_key=GROQ_API_KEY)
 USERS_FILE = "users_data.json"
 
-# Ключевые слова для режимов
-IMAGE_WORDS = ["нарисуй", "сгенерируй картинку", "создай изображение", "нарисуй мне", "сделай фото", "сделай картинку", "картинку", "изображение"]
+IMAGE_WORDS = ["нарисуй", "сгенерируй картинку", "создай изображение", "нарисуй мне", "сделай фото", "сделай картинку"]
 VOICE_WORDS = ["озвучь", "прочитай вслух", "голосом", "озвучить", "сделай аудио", "прочитай текст"]
-PHOTO_WORDS = ["анализ фото", "что на фото", "опиши фото", "анализируй фото", "посмотри фото"]
-STOP_WORDS = ["стоп", "назад", "меню", "хватит", "stop", "back", "старт", "в меню"]
+STOP_WORDS = ["стоп", "назад", "меню", "хватит", "stop", "back", "сброс"]
 REFERRAL_WORDS = ["реферал", "пригласить", "реферальная ссылка", "пригласить друга"]
 
 
@@ -83,6 +81,7 @@ def set_mode(user_id: int, mode: str):
 
 
 def add_to_history(user_id: int, role: str, content: str):
+    """Добавляет сообщение в единую историю — для всех режимов"""
     users = load_users()
     uid = str(user_id)
     if uid not in users:
@@ -157,33 +156,43 @@ def register_referral(new_user_id: int, referrer_id: int):
 
 # ── AI функции ───────────────────────────────────────────────
 
-def generate_text(user_id: int, user_prompt: str) -> str:
+def chat_with_memory(user_id: int, user_prompt: str, system: str) -> str:
+    """Универсальный чат с памятью — используется для всех текстовых режимов"""
     history = get_history(user_id)
-    system = (
-        "Ты профессиональный копирайтер и AI ассистент на русском языке. "
-        "Пиши грамотно, убедительно и по делу. "
-        "Если просят пост — делай его живым и вовлекающим. "
-        "Если резюме — структурированным. Если рекламный текст — цепляющим. "
-        "Помни контекст предыдущих сообщений. "
-        "Не используй символы * # и другое markdown форматирование в ответе."
-    )
     messages = [{"role": "system", "content": system}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_prompt})
+
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
         max_tokens=1024
     )
     result = response.choices[0].message.content
+
+    # Сохраняем в общую память
     add_to_history(user_id, "user", user_prompt)
     add_to_history(user_id, "assistant", result)
     return result
 
 
-def analyze_photo(image_bytes: bytes, caption: str = "") -> str:
+def generate_text(user_id: int, user_prompt: str) -> str:
+    system = (
+        "Ты профессиональный копирайтер и AI ассистент на русском языке. "
+        "Пиши грамотно, убедительно и по делу. "
+        "Если просят пост — делай его живым и вовлекающим. "
+        "Если резюме — структурированным. Если рекламный текст — цепляющим. "
+        "Помни весь контекст разговора включая описания фото и предыдущие сообщения. "
+        "Не используй символы * # и другое markdown форматирование в ответе."
+    )
+    return chat_with_memory(user_id, user_prompt, system)
+
+
+def analyze_photo(user_id: int, image_bytes: bytes, caption: str = "") -> str:
+    """Анализирует фото и сохраняет результат в общую память"""
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
     prompt = caption if caption else "Опиши подробно что изображено на этом фото. Отвечай на русском языке."
+
     response = client.chat.completions.create(
         model="meta-llama/llama-4-scout-17b-16e-instruct",
         messages=[{
@@ -195,7 +204,16 @@ def analyze_photo(image_bytes: bytes, caption: str = "") -> str:
         }],
         max_tokens=1024
     )
-    return response.choices[0].message.content
+    result = response.choices[0].message.content
+
+    # Сохраняем в общую память — чтобы бот помнил что было на фото
+    photo_context = f"[Пользователь прислал фото. Описание: {result}]"
+    if caption:
+        photo_context = f"[Пользователь прислал фото с подписью '{caption}'. Описание: {result}]"
+    add_to_history(user_id, "user", photo_context)
+    add_to_history(user_id, "assistant", result)
+
+    return result
 
 
 def generate_image(prompt: str) -> bytes:
@@ -222,6 +240,12 @@ def footer_text(user_id: int, is_paid: bool) -> str:
     return f"\n\nЛимит исчерпан!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
 
 
+def start_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💡 Что я умею?", callback_data="what_can_i_do")]
+    ])
+
+
 # ── Хендлеры ────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,31 +269,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"Привет, {user.first_name}!\n\n"
         "Я Qil — твой AI ассистент ✍️\n\n"
-        "Просто напиши мне что нужно:\n\n"
-        "Нарисуй закат над морем\n"
-        "Озвучь: привет, это мой текст\n"
-        "Напиши пост про кофейный магазин\n"
-        "Отправь фото — опишу что на нём\n\n"
-        f"У тебя {FREE_REQUESTS_LIMIT} бесплатных запросов\n\n"
-        "Напиши СТОП чтобы сбросить режим"
+        "Просто напиши мне что нужно — я сам пойму!\n\n"
+        f"У тебя {FREE_REQUESTS_LIMIT} бесплатных запросов"
     )
-    await update.message.reply_text(text, reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(text, reply_markup=start_keyboard())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "Как пользоваться Qil:\n\n"
-        "Просто пиши что хочешь — я сам пойму!\n\n"
-        "Примеры:\n"
-        "- Нарисуй кота в космосе\n"
-        "- Озвучь: текст для озвучки\n"
-        "- Напиши пост для Instagram\n"
-        "- Отправь фото с вопросом в подписи\n"
-        "- Реферальная ссылка\n\n"
         "Команды:\n"
         "/start — начало\n"
-        "/status — статистика\n"
-        "/clear — очистить память\n\n"
+        "/status — статистика и остаток запросов\n"
+        "/clear — очистить память разговора\n\n"
         f"Подписка: {SUBSCRIPTION_PRICE} — безлимит\n"
         f"{PAYMENT_INFO}"
     )
@@ -279,19 +290,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(update.effective_user.id)
     is_paid = user_data["is_paid"]
-    mode = user_data.get("mode", "text")
     history_len = len(user_data.get("history", [])) // 2
     referrals = user_data.get("referrals", 0)
     bonus = user_data.get("bonus_requests", 0)
-    modes = {
-        "text": "✍️ Текст", "image": "🎨 Картинка",
-        "voice": "🔊 Озвучка", "photo": "📸 Фото"
-    }
 
     if is_paid:
         text = (
             f"Премиум — безлимит!\n"
-            f"Режим: {modes.get(mode, 'Текст')}\n"
             f"Память: {history_len} сообщений\n"
             f"Рефералов: {referrals}"
         )
@@ -300,9 +305,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"Осталось запросов: {remaining}\n"
             f"Из них бонусных: {bonus}\n"
-            f"Режим: {modes.get(mode, 'Текст')}\n"
             f"Память: {history_len} сообщений\n"
-            f"Рефералов: {referrals}\n"
+            f"Рефералов приглашено: {referrals}\n"
         )
         if remaining == 0:
             text += f"\nЛимит исчерпан!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
@@ -312,7 +316,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_history(update.effective_user.id)
-    await update.message.reply_text("🧹 Память очищена!")
+    await update.message.reply_text("🧹 Память очищена! Начинаем с чистого листа.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -322,19 +326,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_input = update.message.text
     text_lower = text_input.lower().strip()
 
-    # Стоп — сброс режима
+    # Стоп
     if text_lower in STOP_WORDS:
         set_mode(user_id, "text")
         await update.message.reply_text(
-            "Режим сброшен! Пиши что нужно:\n\n"
-            "Нарисуй, Озвучь, Напиши пост..."
+            "Режим сброшен! Пиши что нужно.",
+            reply_markup=start_keyboard()
         )
         return
 
     # Реферальная ссылка
     if any(w in text_lower for w in REFERRAL_WORDS):
-        bot = await context.bot.get_me()
-        ref_link = f"https://t.me/{bot.username}?start=ref_{user_id}"
+        bot_info = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
         user_data2 = get_user(user_id)
         await update.message.reply_text(
             f"👥 Реферальная программа\n\n"
@@ -345,31 +349,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Определяем режим по ключевым словам
-    mode = user_data.get("mode", "text")
-
-    if any(w in text_lower for w in IMAGE_WORDS):
-        mode = "image"
-        set_mode(user_id, "image")
-    elif any(w in text_lower for w in VOICE_WORDS):
-        mode = "voice"
-        set_mode(user_id, "voice")
-    elif any(w in text_lower for w in PHOTO_WORDS):
-        mode = "photo"
-        set_mode(user_id, "photo")
-
-    # Режим фото — просим прислать фото
-    if mode == "photo":
-        await update.message.reply_text(
-            "📸 Отправь фото!\nМожешь добавить подпись с вопросом.\n\nНапиши СТОП чтобы выйти."
-        )
-        return
-
     if not check_limit(user_id):
         await update.message.reply_text(
             f"Лимит исчерпан!\n\nПодписка — {SUBSCRIPTION_PRICE}, безлимит!\n{PAYMENT_INFO}"
         )
         return
+
+    # Определяем режим
+    mode = "text"
+    if any(w in text_lower for w in IMAGE_WORDS):
+        mode = "image"
+    elif any(w in text_lower for w in VOICE_WORDS):
+        mode = "voice"
 
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
@@ -381,11 +372,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Рисую, подожди 15-30 секунд...")
             image_bytes = generate_image(text_input)
             increment_requests(user_id)
+            # Сохраняем в память
+            add_to_history(user_id, "user", f"[Пользователь попросил нарисовать: {text_input}]")
+            add_to_history(user_id, "assistant", "[Изображение создано и отправлено]")
             caption = footer_text(user_id, is_paid).strip()
             await update.message.reply_photo(photo=image_bytes, caption=caption)
 
         elif mode == "voice":
-            # Убираем ключевое слово из текста
             clean_text = text_input
             for w in ["озвучь", "озвучить", "прочитай вслух", "голосом", "сделай аудио", "прочитай текст", "прочитай"]:
                 clean_text = clean_text.replace(w, "").replace(w.capitalize(), "").strip(" :,-")
@@ -394,12 +387,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             audio = generate_voice(clean_text)
             increment_requests(user_id)
+            add_to_history(user_id, "user", f"[Пользователь попросил озвучить: {clean_text}]")
+            add_to_history(user_id, "assistant", "[Аудио создано и отправлено]")
             await update.message.reply_voice(voice=audio)
             ft = footer_text(user_id, is_paid)
             if ft:
                 await update.message.reply_text(ft.strip())
 
-        else:  # text режим
+        else:
             result = generate_text(user_id, text_input)
             increment_requests(user_id)
             ft = footer_text(user_id, is_paid)
@@ -427,13 +422,44 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
         caption = update.message.caption or ""
-        result = analyze_photo(bytes(image_bytes), caption)
+        result = analyze_photo(user_id, bytes(image_bytes), caption)
         increment_requests(user_id)
         ft = footer_text(user_id, is_paid)
         await update.message.reply_text(result + ft)
     except Exception as e:
         logger.error(f"Ошибка анализа фото: {e}")
         await update.message.reply_text("Не удалось проанализировать фото, попробуй ещё раз.")
+
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "what_can_i_do":
+        text = (
+            "Вот что я умею:\n\n"
+            "✍️ Генерация текстов\n"
+            "Напиши: Напиши пост про кофейный магазин\n"
+            "Или: Составь резюме для маркетолога\n"
+            "Или: Придумай рекламный текст для доставки еды\n\n"
+            "🎨 Генерация картинок\n"
+            "Напиши: Нарисуй кота в космосе\n"
+            "Или: Нарисуй горный закат в стиле акварель\n"
+            "Чем точнее описание — тем лучше результат!\n\n"
+            "🔊 Озвучка текста\n"
+            "Напиши: Озвучь: твой текст здесь\n\n"
+            "📸 Анализ фото\n"
+            "Просто отправь фото — опишу что на нём\n"
+            "Или добавь подпись с вопросом к фото\n\n"
+            "🧠 Память разговора\n"
+            "Я помню весь наш разговор — можешь задавать уточняющие вопросы!\n"
+            "Например после анализа фото: А что на заднем плане?\n\n"
+            "👥 Реферальная программа\n"
+            "Напиши: реферальная ссылка\n"
+            "За каждого друга получаешь +10 бонусных запросов!\n\n"
+            "Напиши СТОП чтобы сбросить режим"
+        )
+        await query.message.reply_text(text)
 
 
 def main():
@@ -443,6 +469,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
