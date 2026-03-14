@@ -3,11 +3,12 @@ Qil — AI Telegram бот
 Полная память для всех режимов + кнопки старта
 Зависимости: pip install python-telegram-bot groq gtts requests
 """
-
+ 
 import logging
 import json
 import os
 import io
+import re
 import base64
 import requests
 from pathlib import Path
@@ -18,7 +19,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler
 )
-
+ 
 # ============================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8745686881:AAGXFVZ0s2GWPqPCb_pjDQgmZXMucDD1CE0")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
@@ -28,32 +29,30 @@ SUBSCRIPTION_PRICE = "100 руб/месяц"
 PAYMENT_INFO = "Для оплаты напишите @livix95"
 MAX_MEMORY = 30
 # ============================================================
-
+ 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+ 
 client = Groq(api_key=GROQ_API_KEY)
 USERS_FILE = "users_data.json"
-
-IMAGE_WORDS = ["нарисуй", "сгенерируй картинку", "создай изображение", "нарисуй мне", "сделай фото", "сделай картинку", "нарисуй картинку"]
-VOICE_WORDS = ["озвучь", "прочитай вслух", "голосом", "озвучить", "сделай аудио", "прочитай текст"]
+ 
 STOP_WORDS = ["стоп", "назад", "меню", "хватит", "stop", "back", "сброс"]
-
-
+ 
+ 
 # ── База данных ──────────────────────────────────────────────
-
+ 
 def load_users() -> dict:
     if Path(USERS_FILE).exists():
         with open(USERS_FILE, "r") as f:
             return json.load(f)
     return {}
-
-
+ 
+ 
 def save_users(users: dict):
     with open(USERS_FILE, "w") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
-
-
+ 
+ 
 def get_user(user_id: int) -> dict:
     users = load_users()
     uid = str(user_id)
@@ -70,8 +69,8 @@ def get_user(user_id: int) -> dict:
         }
         save_users(users)
     return users[uid]
-
-
+ 
+ 
 def add_to_history(user_id: int, role: str, content: str):
     users = load_users()
     uid = str(user_id)
@@ -83,24 +82,24 @@ def add_to_history(user_id: int, role: str, content: str):
     if len(users[uid]["history"]) > MAX_MEMORY * 2:
         users[uid]["history"] = users[uid]["history"][-MAX_MEMORY * 2:]
     save_users(users)
-
-
+ 
+ 
 def save_last_image(user_id: int, prompt: str):
     users = load_users()
     uid = str(user_id)
     if uid in users:
         users[uid]["last_image_prompt"] = prompt
         save_users(users)
-
-
+ 
+ 
 def save_last_voice(user_id: int, text: str):
     users = load_users()
     uid = str(user_id)
     if uid in users:
         users[uid]["last_voice_text"] = text
         save_users(users)
-
-
+ 
+ 
 def clear_history(user_id: int):
     users = load_users()
     uid = str(user_id)
@@ -109,12 +108,12 @@ def clear_history(user_id: int):
         users[uid]["last_image_prompt"] = None
         users[uid]["last_voice_text"] = None
         save_users(users)
-
-
+ 
+ 
 def get_history(user_id: int) -> list:
     return get_user(user_id).get("history", [])
-
-
+ 
+ 
 def increment_requests(user_id: int):
     users = load_users()
     uid = str(user_id)
@@ -124,28 +123,20 @@ def increment_requests(user_id: int):
     else:
         users[uid]["requests"] = user.get("requests", 0) + 1
     save_users(users)
-
-
-def set_paid(user_id: int):
-    users = load_users()
-    uid = str(user_id)
-    if uid in users:
-        users[uid]["is_paid"] = True
-        save_users(users)
-
-
+ 
+ 
 def check_limit(user_id: int) -> bool:
     d = get_user(user_id)
     if d.get("unlimited"):
         return True
     return d["requests"] < FREE_REQUESTS_LIMIT or d.get("bonus_requests", 0) > 0
-
-
+ 
+ 
 def get_remaining(user_id: int) -> int:
     d = get_user(user_id)
     return max(0, FREE_REQUESTS_LIMIT - d["requests"]) + d.get("bonus_requests", 0)
-
-
+ 
+ 
 def register_referral(new_user_id: int, referrer_id: int):
     users = load_users()
     new_uid = str(new_user_id)
@@ -157,15 +148,65 @@ def register_referral(new_user_id: int, referrer_id: int):
         users[new_uid]["referred_by"] = referrer_id
         if ref_uid in users:
             users[ref_uid]["referrals"] = users[ref_uid].get("referrals", 0) + 1
-            # Разблокируем безлимит за первого реферала
             users[ref_uid]["unlimited"] = True
         save_users(users)
         return True
     return False
-
-
+ 
+ 
+# ── Парсинг JSON ─────────────────────────────────────────────
+ 
+def parse_ai_response(raw: str) -> dict:
+    """
+    Надёжный парсинг JSON из ответа модели.
+    Обрабатывает все варианты: чистый JSON, JSON внутри текста, JSON в ```блоках```.
+    """
+    # Убираем markdown блоки
+    clean = raw.strip()
+    clean = re.sub(r'```json\s*', '', clean)
+    clean = re.sub(r'```\s*', '', clean)
+    clean = clean.strip()
+ 
+    # Пробуем найти JSON объект в тексте
+    json_match = re.search(r'\{[^{}]*"type"\s*:\s*"(text|image|voice)"[^{}]*\}', clean, re.DOTALL)
+    if json_match:
+        try:
+            result = json.loads(json_match.group(0))
+            if result.get("type") in ["text", "image", "voice"] and result.get("content"):
+                return result
+        except Exception:
+            pass
+ 
+    # Пробуем найти любой JSON объект с вложенностью
+    brace_start = clean.find('{')
+    if brace_start != -1:
+        depth = 0
+        end_pos = brace_start
+        for i in range(brace_start, len(clean)):
+            if clean[i] == '{':
+                depth += 1
+            elif clean[i] == '}':
+                depth -= 1
+            if depth == 0:
+                end_pos = i + 1
+                break
+        json_candidate = clean[brace_start:end_pos]
+        try:
+            result = json.loads(json_candidate)
+            if result.get("type") in ["text", "image", "voice"]:
+                return result
+        except Exception:
+            pass
+ 
+    # Если ничего не нашли — возвращаем как текст, убирая JSON мусор
+    text_clean = re.sub(r'\{.*?\}', '', clean, flags=re.DOTALL).strip()
+    final_text = text_clean if text_clean else clean
+    logger.warning(f"JSON not parsed, using raw text. Raw: {raw[:200]}")
+    return {"type": "text", "content": final_text}
+ 
+ 
 # ── AI функции ───────────────────────────────────────────────
-
+ 
 def smart_response(user_id: int, user_prompt: str) -> dict:
     """
     Умный ответ с памятью — анализирует контекст и решает:
@@ -178,56 +219,42 @@ def smart_response(user_id: int, user_prompt: str) -> dict:
     user_data = get_user(user_id)
     last_image = user_data.get("last_image_prompt")
     last_voice = user_data.get("last_voice_text")
-
+ 
     system = (
-        "Ты Qil — живой, харизматичный AI ассистент и копирайтер на русском языке. "
+        "Ты Qil — живой, харизматичный AI ассистент на русском языке. "
         "У тебя есть характер: ты весёлый, искренний, иногда немного саркастичный но добрый. "
         "Ты реагируешь на запросы как человек — с эмоциями и эмодзи. "
-        "Ты помнишь весь контекст разговора включая фото, картинки и озвучку. "
-        "КРИТИЧЕСКИ ВАЖНО: ты ВСЕГДА отвечаешь ТОЛЬКО валидным JSON — никакого текста до или после JSON! "
-        "Если пользователь просит изменить предыдущую картинку — верни: {\"type\": \"image\", \"content\": \"новый промпт на английском\"}\n"
-        "Если пользователь просит переозвучить — верни: {\"type\": \"voice\", \"content\": \"новый текст\"}\n"
-        "Если просит нарисовать — верни: {\"type\": \"image\", \"content\": \"промпт на английском\"}\n"
-        "Если просит озвучить — верни: {\"type\": \"voice\", \"content\": \"текст\"}\n"
-        "Во всех остальных случаях верни: {\"type\": \"text\", \"content\": \"твой живой ответ с характером\"}\n"
-        "ЗАПРЕЩЕНО писать что-либо кроме JSON! Никакого текста до или после!\n"
+        "Ты помнишь весь контекст разговора включая фото, картинки и озвучку.\n\n"
+        "КРИТИЧЕСКИ ВАЖНО: отвечай ТОЛЬКО валидным JSON. "
+        "Никакого текста до или после JSON. Никаких markdown блоков.\n\n"
+        "Правила выбора типа ответа:\n"
+        "- Если просит нарисовать/сгенерировать картинку: {\"type\": \"image\", \"content\": \"промпт на английском\"}\n"
+        "- Если просит изменить предыдущую картинку: {\"type\": \"image\", \"content\": \"новый улучшенный промпт на английском\"}\n"
+        "- Если просит озвучить текст: {\"type\": \"voice\", \"content\": \"текст для озвучки\"}\n"
+        "- Во всех остальных случаях: {\"type\": \"text\", \"content\": \"твой живой ответ\"}\n\n"
         f"Последний промпт для картинки: {last_image or 'нет'}\n"
         f"Последний текст для озвучки: {last_voice or 'нет'}"
     )
-
+ 
     messages = [{"role": "system", "content": system}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_prompt})
-
+ 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
         max_tokens=1024
     )
     raw = response.choices[0].message.content.strip()
-
-    try:
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        # Если в ответе есть JSON внутри текста — найдём его
-        if '{"type"' in clean:
-            start = clean.index('{"type"')
-            clean = clean[start:]
-        result = json.loads(clean)
-        if result.get("type") not in ["text", "image", "voice"]:
-            result = {"type": "text", "content": raw}
-    except:
-        # Если JSON не распарсился — отвечаем текстом, убираем JSON мусор
-        import re
-        clean_text = re.sub(r'\{.*?\}', '', raw, flags=re.DOTALL).strip()
-        result = {"type": "text", "content": clean_text if clean_text else raw}
-
-    return result
-
-
+    logger.info(f"Raw AI response: {raw[:300]}")
+ 
+    return parse_ai_response(raw)
+ 
+ 
 def analyze_photo_ai(user_id: int, image_bytes: bytes, caption: str = "") -> str:
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
     prompt = caption if caption else "Опиши подробно что изображено на этом фото. Отвечай на русском языке."
-
+ 
     response = client.chat.completions.create(
         model="meta-llama/llama-4-scout-17b-16e-instruct",
         messages=[{
@@ -240,71 +267,45 @@ def analyze_photo_ai(user_id: int, image_bytes: bytes, caption: str = "") -> str
         max_tokens=1024
     )
     result = response.choices[0].message.content
-
-    # Сохраняем в память
+ 
     user_msg = f"[Отправил фото{'с подписью: ' + caption if caption else ''}]"
     add_to_history(user_id, "user", user_msg)
     add_to_history(user_id, "assistant", f"[Описание фото]: {result}")
-
+ 
     return result
-
-
+ 
+ 
 def generate_image(prompt: str) -> bytes:
     enhanced = f"{prompt}, high quality, detailed, professional, 4k, sharp focus, beautiful lighting, masterpiece"
     url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(enhanced)}?width=768&height=768&nologo=true&enhance=true&model=flux"
     resp = requests.get(url, timeout=90)
     return resp.content
-
-
+ 
+ 
 def generate_voice(text: str) -> io.BytesIO:
     tts = gTTS(text=text, lang="ru")
     audio = io.BytesIO()
     tts.write_to_fp(audio)
     audio.seek(0)
     return audio
-
-
-def get_reaction(request_type: str, user_prompt: str) -> str:
-    """Генерирует живой комментарий к запросу пользователя"""
-    try:
-        prompt = (
-            f"Ты весёлый и живой AI ассистент по имени Qil. "
-            f"Пользователь только что попросил тебя: '{user_prompt}'\n"
-            f"Тип запроса: {request_type}\n\n"
-            f"Напиши короткую живую реакцию (1-2 предложения максимум) — "
-            f"как будто ты реально заинтересован и рад помочь. "
-            f"Можешь добавить эмодзи. Будь естественным, не занудным. "
-            f"Не повторяй запрос дословно — просто отреагируй по-человечески. "
-            f"Примеры: 'О, интересная тема! Сейчас сделаю 🔥', "
-            f"'Ха, люблю такие задачи 😄 Погнали!', "
-            f"'Хм, надо подумать... но уже есть идеи! ✍️'"
-        )
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=80
-        )
-        return response.choices[0].message.content.strip()
-    except:
-        return ""
-
-
+ 
+ 
 def footer_text(user_id: int, is_paid: bool) -> str:
-    return ""  # Лимит временно отключён
-
-
+    return ""
+ 
+ 
 def start_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💡 Что я умею?", callback_data="what_can_i_do")]
     ])
-
-
+ 
+ 
 # ── Хендлеры ────────────────────────────────────────────────
-
+ 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     get_user(user.id)
-
+ 
     if context.args and context.args[0].startswith("ref_"):
         try:
             referrer_id = int(context.args[0].replace("ref_", ""))
@@ -318,59 +319,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "Теперь ты можешь пользоваться ботом без ограничений 🚀"
                         )
                     )
-                except:
+                except Exception:
                     pass
-        except:
+        except Exception:
             pass
-
+ 
     text = (
         f"Привет, {user.first_name}!\n\n"
         "Я Qil — твой AI ассистент ✍️\n\n"
         "Просто напиши мне что нужно — я сам пойму!"
     )
     await update.message.reply_text(text, reply_markup=start_keyboard())
-
-
+ 
+ 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = get_user(update.effective_user.id)
     is_paid = d["is_paid"]
     history_len = len(d.get("history", [])) // 2
     referrals = d.get("referrals", 0)
     bonus = d.get("bonus_requests", 0)
-
-    if is_paid:
-        text = f"Премиум — безлимит!\nПамять: {history_len} сообщений\nРефералов: {referrals}"
+ 
+    if is_paid or d.get("unlimited"):
+        text = f"✅ Безлимитный доступ!\nПамять: {history_len} сообщений\nРефералов: {referrals}"
     else:
         remaining = get_remaining(update.effective_user.id)
         text = (
+            f"📊 Статус\n\n"
             f"Осталось запросов: {remaining}\n"
-            f"Из них бонусных: {bonus}\n"
+            f"Бонусных: {bonus}\n"
             f"Память: {history_len} сообщений\n"
             f"Рефералов: {referrals}\n"
         )
         if remaining == 0:
             text += f"\nЛимит исчерпан!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}"
-
+ 
     await update.message.reply_text(text)
-
-
+ 
+ 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_history(update.effective_user.id)
     await update.message.reply_text("🧹 Память очищена!")
-
-
+ 
+ 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_paid = get_user(user_id)["is_paid"]
     text_input = update.message.text
     text_lower = text_input.lower().strip()
-
+ 
     # Стоп
     if text_lower in STOP_WORDS:
         clear_history(user_id)
         await update.message.reply_text("Память сброшена! Начинаем заново.", reply_markup=start_keyboard())
         return
-
+ 
     # Реферал
     if any(w in text_lower for w in ["реферал", "пригласить", "реферальная ссылка"]):
         bot_info = await context.bot.get_me()
@@ -378,34 +380,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         d = get_user(user_id)
         await update.message.reply_text(
             f"👥 Реферальная программа\n\n"
-            f"За каждого друга +{REFERRAL_BONUS} бонусных запросов!\n\n"
+            f"За каждого друга — безлимитный доступ!\n\n"
             f"Твоя ссылка:\n{ref_link}\n\n"
             f"Приглашено: {d.get('referrals', 0)}\n"
             f"Бонусных запросов: {d.get('bonus_requests', 0)}"
         )
         return
-
+ 
+    # Проверка лимита
     if not check_limit(user_id):
         bot_info = await context.bot.get_me()
         ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
         await update.message.reply_text(
             "✨ Твой пробный период завершён!\n\n"
             "Ты использовал все 10 бесплатных запросов.\n\n"
-            "Хочешь продолжить? Всё просто:\n"
-            "👇 Пригласи одного друга по своей ссылке\n"
-            "Как только он напишет боту — ты получишь безлимитный доступ!\n\n"
+            "👇 Пригласи одного друга — получишь безлимитный доступ!\n\n"
             f"Твоя ссылка:\n{ref_link}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📨 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Попробуй этого AI ассистента — он пишет тексты, рисует картинки и озвучивает! 🔥")]
+                [InlineKeyboardButton(
+                    "📨 Поделиться ссылкой",
+                    url=f"https://t.me/share/url?url={ref_link}&text=Попробуй этого AI ассистента — он пишет тексты, рисует картинки и озвучивает! 🔥"
+                )]
             ])
         )
         return
-
+ 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
+ 
     try:
         result = smart_response(user_id, text_input)
-
+        logger.info(f"Parsed result type: {result.get('type')}")
+ 
         if result["type"] == "image":
             prompt = result["content"]
             await update.message.reply_text("Рисую, подожди 15-30 секунд... 🎨")
@@ -415,47 +420,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_last_image(user_id, prompt)
             add_to_history(user_id, "user", f"[Запрос на картинку]: {text_input}")
             add_to_history(user_id, "assistant", f"[Нарисовал картинку по промпту]: {prompt}")
-            caption = footer_text(user_id, is_paid).strip()
-            await update.message.reply_photo(photo=image_bytes, caption=caption)
-
+            await update.message.reply_photo(photo=image_bytes)
+ 
         elif result["type"] == "voice":
             voice_text = result["content"]
             if not voice_text.strip():
                 await update.message.reply_text("Напиши текст для озвучки, например:\nОзвучь: Привет!")
                 return
+            await update.message.reply_text("Озвучиваю... 🎙️")
             audio = generate_voice(voice_text)
             increment_requests(user_id)
             save_last_voice(user_id, voice_text)
             add_to_history(user_id, "user", f"[Запрос на озвучку]: {text_input}")
             add_to_history(user_id, "assistant", f"[Озвучил текст]: {voice_text}")
             await update.message.reply_voice(voice=audio)
-            ft = footer_text(user_id, is_paid)
-            if ft:
-                await update.message.reply_text(ft.strip())
-
+ 
         else:
             text_result = result["content"]
+            if not text_result:
+                text_result = "Не понял запрос, попробуй переформулировать."
             increment_requests(user_id)
             add_to_history(user_id, "user", text_input)
             add_to_history(user_id, "assistant", text_result)
-            ft = footer_text(user_id, is_paid)
-            await update.message.reply_text(text_result + ft)
-
+            await update.message.reply_text(text_result)
+ 
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
+        logger.error(f"Ошибка в handle_message: {e}", exc_info=True)
         await update.message.reply_text("Что-то пошло не так, попробуй ещё раз.")
-
-
+ 
+ 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_paid = get_user(user_id)["is_paid"]
-
+ 
     if not check_limit(user_id):
         await update.message.reply_text(f"Лимит исчерпан!\nПодписка: {SUBSCRIPTION_PRICE}\n{PAYMENT_INFO}")
         return
-
+ 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
+ 
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
@@ -463,73 +466,65 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = update.message.caption or ""
         result = analyze_photo_ai(user_id, bytes(image_bytes), caption)
         increment_requests(user_id)
-        ft = footer_text(user_id, is_paid)
-        await update.message.reply_text(result + ft)
+        await update.message.reply_text(result)
     except Exception as e:
-        logger.error(f"Ошибка анализа фото: {e}")
+        logger.error(f"Ошибка анализа фото: {e}", exc_info=True)
         await update.message.reply_text("Не удалось проанализировать фото, попробуй ещё раз.")
-
-
+ 
+ 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
+ 
     if query.data == "what_can_i_do":
         text = (
             "Вот что я умею:\n\n"
             "✍️ Генерация текстов\n"
             "Напиши пост про кофейный магазин\n"
-            "Составь резюме для маркетолога с 3 годами опыта\n"
-            "Придумай рекламный текст для доставки еды\n\n"
+            "Составь резюме для маркетолога\n\n"
             "🎨 Генерация картинок\n"
             "Нарисуй кота в космосе\n"
-            "Нарисуй горный закат в стиле акварель\n"
-            "Сделай картинку минималистичнее — и я изменю предыдущую!\n\n"
+            "Сделай картинку темнее — изменю предыдущую!\n\n"
             "🔊 Озвучка текста\n"
-            "Озвучь: Привет, это мой текст\n"
-            "Сделай голос медленнее — изменю предыдущую озвучку!\n\n"
+            "Озвучь: Привет, это мой текст\n\n"
             "📸 Анализ фото\n"
-            "Просто отправь фото — опишу что на нём\n"
-            "Добавь подпись с вопросом: что здесь за здание?\n\n"
+            "Просто отправь фото — опишу что на нём\n\n"
             "🧠 Полная память\n"
-            "Я помню весь разговор!\n"
-            "После картинки: сделай её темнее\n"
-            "После текста: сделай короче\n"
-            "После фото: а что на заднем плане?\n\n"
+            "Я помню весь разговор!\n\n"
             "👥 Рефералы\n"
             "Напиши: реферальная ссылка\n"
-            "За каждого друга +10 запросов!\n\n"
+            "За друга — безлимитный доступ!\n\n"
             "Напиши СТОП чтобы сбросить память"
         )
         await query.message.reply_text(text)
-
+ 
     elif query.data == "referral":
         bot_info = await context.bot.get_me()
         ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
         d = get_user(user_id)
         await query.message.reply_text(
             f"👥 Реферальная программа\n\n"
-            f"За каждого друга +{REFERRAL_BONUS} бонусных запросов!\n\n"
+            f"За каждого друга — безлимитный доступ!\n\n"
             f"Твоя ссылка:\n{ref_link}\n\n"
             f"Приглашено: {d.get('referrals', 0)}\n"
             f"Бонусных запросов: {d.get('bonus_requests', 0)}"
         )
-
-
+ 
+ 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
+ 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+ 
     logger.info("Qil bot запущен!")
     app.run_polling()
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
